@@ -8,17 +8,19 @@ export interface DailyData {
   siteName: string;
   ghiBudget: number;
   ghiActual: number | null;
+  poaBudget: number | null;
+  poaActual: number | null;
   kwhBudget: number;
   prBudget: number;
-  correctedPrBudget: number | null; 
-  contractorPrTarget: number | null; 
+  correctedPrBudget: number | null;
+  contractorPrTarget: number | null;
   kwhActual: number | null;
   prActual: number | null;
-  systemCapacity: number | null; 
-  invCapacity: number | null; 
-  bessCapacity: number | null; 
-  bessOperationMode: string | null; 
-  cod: Date | null; 
+  systemCapacity: number | null;
+  invCapacity: number | null;
+  bessCapacity: number | null;
+  bessOperationMode: string | null;
+  cod: Date | null;
   kwhForecast: number | null;
   ghiForecast: number | null;
   isForecast: boolean;
@@ -26,9 +28,11 @@ export interface DailyData {
   estimatedLoss?: number;
   moduleTemp: number | null;
   curtailment: number | null;
-  thermalVariance: number; 
-  paeEnergy: number | null; 
-  // New Availability Fields
+  thermalVariance: number;
+  lossFactor: number;
+  theoPoaAct: number;
+  theoPoaBud: number;
+  paeEnergy: number | null;
   guaranteedAvailability: number | null;
   actualAvailability: number | null;
 }
