@@ -8,9 +8,6 @@ This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/714db369-b947-4641-a788-bf58db681efc
 
-## Run via Github Pages
-https://nabilhaidr.github.io/SolarYieldPro-v2/
-
 ## Run Locally
 
 **Prerequisites:**  Node.js
@@ -21,3 +18,6 @@ https://nabilhaidr.github.io/SolarYieldPro-v2/
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Run via Github Pages
+https://nabilhaidr.github.io/SolarYieldPro-v2/
