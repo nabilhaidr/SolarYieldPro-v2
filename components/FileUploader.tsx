@@ -15,9 +15,11 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
 
   const downloadTemplate = () => {
     const headers = [
-      "Date", "Site Name", 
-      "PV Capacity (kWp)", "Inverter Capacity (kW)", "BESS Capacity (kWh)", 
-      "GHI Budget", "kWh Budget", "PR Budget", "Corrected PR Budget", "O&M Contractor PR Target",
+      "Date", "Site Name",
+      "PV Capacity (kWp)", "Inverter Capacity (kW)", "BESS Capacity (kWh)",
+      "GHI Budget (kWh/m²)", "GHI Actual (kWh/m²)",
+      "POA Budget (kWh/m²)", "POA Actual (kWh/m²)",
+      "kWh Budget", "PR Budget", "Corrected PR Budget", "O&M Contractor PR Target",
       "kWh Actual", "PR Actual", "PAE Energy (kWh)",
       "Guaranteed Availability (%)", "Actual Availability (%)",
       "Notes", "Estimated Loss (kWh)",
@@ -25,15 +27,18 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
       "BESS Operation Mode", "COD"
     ];
     const rows = [
-      ["2024-01-01", "Site Alpha", 1200, 1000, 0, 5.2, 5200, 0.82, 0.82, 0.815, 5100, 0.81, 5080, 0.99, 0.995, "", "", 45.2, 0, "", "2023-12-01"],
-      ["2024-01-02", "Site Alpha", 1200, 1000, 0, 4.8, 4800, 0.82, 0.82, 0.815, 4000, 0.69, 3950, 0.99, 0.85, "Inverter 2 Offline", 800, 42.1, 150, "", "2023-12-01"],
+      // Date | Site | Cap | Inv | BESS | GHIb | GHIa | POAb | POAa | kWhb | PRb | CPRb | CtrPR | kWha | PRa | PAE | gAvail | aAvail | Notes | EstLoss | Tmod | Curt | BESS Mode | COD
+      ["2024-01-01", "Site Alpha", 1200, 1000, 0, 5.2, 5.1, 5.6, 5.5, 5200, 0.82, 0.82, 0.815, 5100, 0.81, 5080, 0.99, 0.995, "", "", 45.2, 0, "", "2023-12-01"],
+      ["2024-01-02", "Site Alpha", 1200, 1000, 0, 4.8, 4.5, 5.2, 4.9, 4800, 0.82, 0.82, 0.815, 4000, 0.69, 3950, 0.99, 0.85, "Inverter 2 Offline", 800, 42.1, 150, "", "2023-12-01"],
     ];
     const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-    
+
     ws['!cols'] = [
-        { wch: 12 }, { wch: 15 }, 
+        { wch: 12 }, { wch: 15 },
         { wch: 20 }, { wch: 20 }, { wch: 20 },
-        { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 22 },
+        { wch: 16 }, { wch: 16 },
+        { wch: 16 }, { wch: 16 },
+        { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 22 },
         { wch: 12 }, { wch: 12 }, { wch: 15 },
         { wch: 25 }, { wch: 25 },
         { wch: 30 }, { wch: 20 },
@@ -43,7 +48,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Template");
-    XLSX.writeFile(wb, "solar_template_extended_v4.xlsx");
+    XLSX.writeFile(wb, "solar_template_extended_v5_poa.xlsx");
   };
 
   const generateMockData = () => {
@@ -53,6 +58,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
             const headers = [
                 "Date", "Site Name", "System Capacity (kWp)", "Inverter Capacity (kW)", "BESS Capacity (kWh)",
                 "GHI Budget (kWh/m2)", "GHI Actual (kWh/m2)",
+                "POA Budget (kWh/m2)", "POA Actual (kWh/m2)",
                 "kWh Budget", "kWh Actual",
                 "PR Budget", "Corrected PR Budget", "O&M Contractor PR Target", "PR Actual",
                 "PAE Energy (kWh)",
@@ -63,12 +69,15 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
                 "BESS Operation Mode", "COD"
             ];
 
+            // poaFactor = POA / GHI ratio. Tilted/tracker sites have higher factor.
+            // expansionDate (optional): mid-year capacity step-change to exercise dynamic capacity logic.
+            // expansionCapacity: new capacity from expansionDate onward.
             const sites = [
-                { name: "Alpha Solar Park", capacity: 1200, inv: 1000, bess: 0, cod: "2022-06-01" }, 
-                { name: "Beta Roof Systems", capacity: 450, inv: 400, bess: 200, cod: "2023-01-15" },
-                { name: "Gamma Ray Field", capacity: 2500, inv: 2200, bess: 1000, cod: "2021-11-20" },
-                { name: "Delta Energy Hub", capacity: 5000, inv: 4500, bess: 5000, cod: "2022-03-10" },
-                { name: "Epsilon Carport", capacity: 800, inv: 750, bess: 0, cod: "2023-08-01" },
+                { name: "Alpha Solar Park",  capacity: 1200, inv: 1000, bess: 0,    cod: "2022-06-01", poaFactor: 1.10, expansionDate: null,         expansionCapacity: null },
+                { name: "Beta Roof Systems", capacity: 450,  inv: 400,  bess: 200,  cod: "2023-01-15", poaFactor: 1.05, expansionDate: null,         expansionCapacity: null },
+                { name: "Gamma Ray Field",   capacity: 2500, inv: 2200, bess: 1000, cod: "2021-11-20", poaFactor: 1.30, expansionDate: "2025-07-01", expansionCapacity: 3500 }, // expansion
+                { name: "Delta Energy Hub",  capacity: 5000, inv: 4500, bess: 5000, cod: "2022-03-10", poaFactor: 1.12, expansionDate: null,         expansionCapacity: null },
+                { name: "Epsilon Carport",   capacity: 800,  inv: 750,  bess: 0,    cod: "2023-08-01", poaFactor: 1.08, expansionDate: null,         expansionCapacity: null },
             ];
 
             const rows: any[][] = [];
@@ -88,23 +97,32 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
 
             sites.forEach(site => {
                 const bessMode = site.bess > 0 ? bessModes[Math.floor(Math.random() * bessModes.length)] : "";
-                
+                const expansionDate = site.expansionDate ? new Date(site.expansionDate) : null;
+
                 for (let i = 0; i < daysToGenerate; i++) {
                     const currentDate = addDays(startDate, i);
                     const isFuture = currentDate > today;
-                    
+
+                    // Effective capacity for this date (mid-year expansion supported)
+                    const capForDate = (expansionDate && currentDate >= expansionDate && site.expansionCapacity)
+                        ? site.expansionCapacity
+                        : site.capacity;
+
                     const dayOfYear = i % 365;
-                    const seasonality = Math.cos(((dayOfYear - 172) / 365) * 2 * Math.PI); 
-                    
+                    const seasonality = Math.cos(((dayOfYear - 172) / 365) * 2 * Math.PI);
+
                     const ghiBudget = 4.5 + (seasonality * -2.5);
-                    const prBudget = 0.81 + (seasonality * 0.03); 
+                    const poaBudget = ghiBudget * site.poaFactor;
+                    const prBudget = 0.81 + (seasonality * 0.03);
                     const correctedPrBudget = prBudget * 0.99;
                     const contractorPrTarget = prBudget * 0.985;
 
-                    const kwhBudget = ghiBudget * prBudget * site.capacity;
-                    const syBudget = kwhBudget / site.capacity;
+                    // Budget energy now POA-based (more accurate; matches new calculation engine)
+                    const kwhBudget = poaBudget * prBudget * capForDate;
+                    const syBudget = kwhBudget / capForDate;
 
                     let ghiActual: number | null = null;
+                    let poaActual: number | null = null;
                     let prActual: number | null = null;
                     let kwhActual: number | null = null;
                     let syActual: number | null = null;
@@ -119,16 +137,19 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
                     if (!isFuture) {
                         const weather = Math.random() > 0.2 ? 0.9 + (Math.random() * 0.2) : 0.4 + (Math.random() * 0.4);
                         ghiActual = ghiBudget * weather;
-                        
+                        // POA varies slightly from POA budget pattern; small jitter on poaFactor
+                        const poaJitter = 1 + ((Math.random() - 0.5) * 0.04);
+                        poaActual = ghiActual * site.poaFactor * poaJitter;
+
                         const ambient = 25 + (seasonality * -10);
-                        const tempRise = ghiActual * 5; 
+                        const tempRise = poaActual * 5;
                         modTemp = ambient + tempRise;
 
                         let prNoise = 0.95 + (Math.random() * 0.07);
-                        actualAvail = 0.995 + (Math.random() * 0.004); // Usually high
+                        actualAvail = 0.995 + (Math.random() * 0.004);
 
                         if (Math.random() < 0.05) {
-                            curtailment = (kwhBudget * 0.1) + (Math.random() * kwhBudget * 0.2); 
+                            curtailment = (kwhBudget * 0.1) + (Math.random() * kwhBudget * 0.2);
                             if (curtailment < 50) curtailment = 0;
                             if (curtailment > 0) note = "Grid Curtailment";
                         } else {
@@ -139,28 +160,29 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
                             const issueIdx = Math.floor(Math.random() * issues.length);
                             note = issues[issueIdx];
                             prNoise = 0.4 + (Math.random() * 0.3);
-                            // Drop availability if issue
                             actualAvail = 0.7 + (Math.random() * 0.2);
                         }
 
+                        // Realistic temperature loss factor (γ = -0.0029 /°C)
                         const tempLoss = 1 - (0.0029 * (modTemp - 25));
                         prActual = prBudget * prNoise * tempLoss;
                         if (prActual > 0.99) prActual = 0.99;
 
-                        const potentialEnergy = ghiActual * prActual * site.capacity;
+                        // Energy generated based on POA (real-world physics)
+                        const potentialEnergy = poaActual * prActual * capForDate;
                         kwhActual = potentialEnergy - (curtailment || 0);
                         if (kwhActual < 0) kwhActual = 0;
 
                         paeActual = kwhActual * (0.98 + (Math.random() * 0.01));
 
-                        if (ghiActual > 0) {
-                            prActual = kwhActual / (ghiActual * site.capacity);
+                        if (poaActual > 0) {
+                            prActual = kwhActual / (poaActual * capForDate);
                         }
-                        syActual = kwhActual / site.capacity;
-                        
+                        syActual = kwhActual / capForDate;
+
                         if (note && !curtailment) {
-                           const hypotheticalPr = prBudget * 0.95; 
-                           const hypotheticalKwh = ghiActual * hypotheticalPr * site.capacity;
+                           const hypotheticalPr = prBudget * 0.95;
+                           const hypotheticalKwh = poaActual * hypotheticalPr * capForDate;
                            estLoss = Math.max(0, hypotheticalKwh - kwhActual);
                         }
                     }
@@ -168,11 +190,13 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
                     rows.push([
                         format(currentDate, 'yyyy-MM-dd'),
                         site.name,
-                        site.capacity,
+                        capForDate,
                         site.inv,
                         site.bess,
                         ghiBudget.toFixed(3),
                         ghiActual !== null ? ghiActual.toFixed(3) : null,
+                        poaBudget.toFixed(3),
+                        poaActual !== null ? poaActual.toFixed(3) : null,
                         kwhBudget.toFixed(2),
                         kwhActual !== null ? kwhActual.toFixed(2) : null,
                         prBudget.toFixed(4),
@@ -180,8 +204,8 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
                         contractorPrTarget.toFixed(4),
                         prActual !== null ? prActual.toFixed(4) : null,
                         paeActual !== null ? paeActual.toFixed(2) : null,
-                        guaranteedAvail.toFixed(3), // Guaranteed Avail
-                        actualAvail !== null ? actualAvail.toFixed(3) : null, // Actual Avail
+                        guaranteedAvail.toFixed(3),
+                        actualAvail !== null ? actualAvail.toFixed(3) : null,
                         syBudget.toFixed(3),
                         syActual !== null ? syActual.toFixed(3) : null,
                         note,
@@ -197,20 +221,21 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onDataLoaded }) => {
             const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
             ws['!cols'] = [
                 { wch: 12 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 },
-                { wch: 15 }, { wch: 15 }, 
-                { wch: 15 }, { wch: 15 }, 
-                { wch: 12 }, { wch: 22 }, { wch: 22 }, { wch: 12 }, 
-                { wch: 15 }, // PAE
-                { wch: 22 }, { wch: 22 }, // Avail
-                { wch: 15 }, { wch: 15 },
-                { wch: 30 }, { wch: 15 },
-                { wch: 15 }, { wch: 15 },
-                { wch: 20 }, { wch: 15 }
+                { wch: 16 }, { wch: 16 },              // GHI Budget/Actual
+                { wch: 16 }, { wch: 16 },              // POA Budget/Actual (NEW)
+                { wch: 15 }, { wch: 15 },              // kWh Budget/Actual
+                { wch: 12 }, { wch: 22 }, { wch: 22 }, { wch: 12 },
+                { wch: 15 },                            // PAE
+                { wch: 22 }, { wch: 22 },              // Avail
+                { wch: 15 }, { wch: 15 },              // SY
+                { wch: 30 }, { wch: 15 },              // Notes / EstLoss
+                { wch: 15 }, { wch: 15 },              // Tmod / Curtailment
+                { wch: 20 }, { wch: 15 }               // BESS / COD
             ];
 
             const wb = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(wb, ws, "Mock_Extended_v4");
-            XLSX.writeFile(wb, "Solar_Mock_Data_Extended_v4.xlsx");
+            XLSX.utils.book_append_sheet(wb, ws, "Mock_Extended_v5_POA");
+            XLSX.writeFile(wb, "Solar_Mock_Data_Extended_v5_POA.xlsx");
         } catch (e) {
             console.error(e);
             setError("Failed to generate mock data.");
