@@ -258,37 +258,42 @@ const Dashboard: React.FC<DashboardProps> = ({ initialData, onReset }) => {
           }
           
           const acc = map.get(key);
-          const cap = globalCapacityMap.get(d.siteName) || d.systemCapacity || 0;
+          // PER-ROW capacity. Pre-COD rows (cap=0) skip energy theoreticals
+          // so denominator isn't inflated by future capacity.
+          const cap = d.systemCapacity || 0;
 
           acc.kwhBudget += d.kwhBudget;
           acc.kwhActual += (d.kwhActual || 0);
           acc.kwhForecast += d.kwhForecast || 0;
-          
+
           acc.ghiBudget += d.ghiBudget;
           acc.ghiActual += (d.ghiActual || 0);
           acc.ghiForecast += d.ghiForecast || 0;
-          
+
           acc.curtailmentSum += (d.curtailment || 0);
           if (d.kwhActual !== null) acc.energyActualSum += d.kwhActual;
 
-          acc.theoreticalKwhBudget += (d.ghiBudget * cap);
-          if (d.correctedPrBudget) {
-            acc.weightedCorrectedPrBudgetSum += (d.correctedPrBudget * d.ghiBudget * cap);
-          }
-          
-          if (!d.isForecast && d.kwhActual !== null) {
-              const irr = (d.ghiActual !== null && d.ghiActual > 0) ? d.ghiActual : d.ghiBudget;
-              acc.theoreticalKwhActual += (irr * cap);
-              
-              if (d.moduleTemp !== null) {
-                  acc.tempWeightedSum += (d.moduleTemp * irr);
-                  acc.irradianceSumForTemp += irr;
+          if (cap > 0) {
+              // Use POA-based, temp-corrected theoreticals computed in runProjection (single source of truth).
+              acc.theoreticalKwhBudget += d.theoPoaBud;
+              if (d.correctedPrBudget) {
+                  acc.weightedCorrectedPrBudgetSum += (d.correctedPrBudget * d.theoPoaBud);
               }
-              // Accumulate thermal variance
-              acc.varianceThermalSum += d.thermalVariance;
-          }
-          if (d.isForecast) {
-            acc.theoreticalKwhForecast += (d.ghiForecast * cap);
+
+              if (!d.isForecast && d.kwhActual !== null) {
+                  acc.theoreticalKwhActual += d.theoPoaAct;
+
+                  const poaAct = (d.poaActual && d.poaActual > 0) ? d.poaActual
+                               : (d.ghiActual && d.ghiActual > 0) ? d.ghiActual : 0;
+                  if (d.moduleTemp !== null && poaAct > 0) {
+                      acc.tempWeightedSum += (d.moduleTemp * poaAct);
+                      acc.irradianceSumForTemp += poaAct;
+                  }
+                  acc.varianceThermalSum += d.thermalVariance;
+              }
+              if (d.isForecast) {
+                  acc.theoreticalKwhForecast += (d.ghiForecast * cap);
+              }
           }
 
           if (d.guaranteedAvailability !== null) {
@@ -317,17 +322,13 @@ const Dashboard: React.FC<DashboardProps> = ({ initialData, onReset }) => {
           const moduleTemp = acc.irradianceSumForTemp > 0 ? acc.tempWeightedSum / acc.irradianceSumForTemp : null;
           const curtailment = acc.curtailmentSum;
           
-          let correctedPr = null;
-          if (prActual !== null && moduleTemp !== null) {
-             const grossEnergy = acc.energyActualSum + curtailment;
-             const rawGrossPr = acc.theoreticalKwhActual > 0 ? grossEnergy / acc.theoreticalKwhActual : 0;
-             const deltaT = moduleTemp - 25;
-             const lossFactor = deltaT * 0.0029;
-             correctedPr = rawGrossPr + lossFactor;
-
-          } else if (prActual !== null && curtailment > 0) {
-             correctedPr = acc.theoreticalKwhActual > 0 ? (acc.energyActualSum + curtailment) / acc.theoreticalKwhActual : prActual;
-          }
+          // Corrected PR (per user spec / IEC 61724-3):
+          //   Corr_PR = Σ kWh_Actual / Σ Theo_POA_Act
+          // Temperature correction is already baked into theoreticalKwhActual (= Σ d.theoPoaAct).
+          // Curtailment NOT credited — kWh_Actual is post-curtailment per data convention.
+          const correctedPr = acc.theoreticalKwhActual > 0
+              ? acc.energyActualSum / acc.theoreticalKwhActual
+              : null;
 
           const guaranteedAvailability = acc.guaranteedAvailabilityCount > 0 ? acc.guaranteedAvailabilitySum / acc.guaranteedAvailabilityCount : null;
           const actualAvailability = acc.actualAvailabilityCount > 0 ? acc.actualAvailabilitySum / acc.actualAvailabilityCount : null;
