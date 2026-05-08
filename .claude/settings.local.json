@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "PowerShell($ErrorActionPreference = 'Continue'; Set-Location \"C:\\\\Users\\\\nabil\\\\Downloads\\\\SolarYieldPro-main\\\\SolarYieldPro-main\"; $output = & npx tsc --noEmit -p tsconfig.json 2>&1; $output | Where-Object { $_ -notmatch 'pptGenerator' } | Select-Object -First 80)"
+    ]
+  }
+}
