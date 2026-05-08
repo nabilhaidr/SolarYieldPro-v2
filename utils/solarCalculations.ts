@@ -46,8 +46,16 @@ const normalizeKey = (key: string): string => {
      return 'ignore_sy'; 
   }
 
-  // 5. GHI
-  if (k.includes('ghi') || k.includes('irradiation') || k.includes('irradiance') || k.includes('poa')) {
+  // 5a. POA (Plane of Array) — explicit; matched BEFORE GHI to prevent capture
+  if (k.includes('poa') || (k.includes('plane') && k.includes('array')) || k === 'gpoa' || k.includes('tilted')) {
+      if (k.includes('budget') || k.includes('target') || k.includes('expected')) return 'poaBudget';
+      if (k.includes('actual') || k.includes('measured')) return 'poaActual';
+      if (!k.includes('budget') && !k.includes('forecast')) return 'poaActual';
+  }
+
+  // 5b. GHI (Global Horizontal Irradiance) — fallback irradiance
+  if (k.includes('ghi') || (k.includes('global') && k.includes('horizontal')) ||
+      k.includes('irradiation') || k.includes('irradiance')) {
       if (k.includes('budget') || k.includes('target') || k.includes('expected')) return 'ghiBudget';
       if (k.includes('actual') || k.includes('measured')) return 'ghiActual';
       if (!k.includes('budget') && !k.includes('forecast')) return 'ghiActual';
@@ -138,6 +146,15 @@ export const parseRawData = (rows: RawRow[]): DailyData[] => {
      return isValid(d) ? d : null;
   };
 
+  // Sanitize daily irradiance values (kWh/m²). Reject impossible, auto-convert obvious unit errors.
+  const sanitizeIrradiance = (v: number | null): number | null => {
+    if (v === null || v === undefined || isNaN(v)) return null;
+    if (v <= 0) return null;
+    if (v > 50) return v / 1000;   // assume Wh/m² → kWh/m²
+    if (v > 15) return null;       // unrealistic for daily
+    return v;
+  };
+
   const parsed = rows.map(row => {
     const newRow: any = {};
     Object.keys(row).forEach(key => {
@@ -170,11 +187,21 @@ export const parseRawData = (rows: RawRow[]): DailyData[] => {
     let siteName = newRow.siteName ? String(newRow.siteName).trim() : 'Unknown Site';
     if (siteName === '') siteName = 'Unknown Site';
 
+    const poaActualRaw = newRow.poaActual !== undefined && newRow.poaActual !== null ? parseVal(newRow.poaActual) : null;
+    const poaBudgetRaw = newRow.poaBudget !== undefined && newRow.poaBudget !== null ? parseVal(newRow.poaBudget) : null;
+
+    // moduleTemp: preserve null (do NOT coerce to 0) — important so lossFactor uses STC fallback
+    const modTempRaw = newRow.moduleTemp;
+    const modTemp = (modTempRaw !== undefined && modTempRaw !== null && modTempRaw !== '')
+        ? parseVal(modTempRaw) : null;
+
     return {
       date: dateObj,
       siteName: siteName,
       ghiBudget: parseVal(newRow.ghiBudget),
       ghiActual: newRow.ghiActual !== undefined && newRow.ghiActual !== null ? parseVal(newRow.ghiActual) : null,
+      poaBudget: sanitizeIrradiance(poaBudgetRaw),
+      poaActual: sanitizeIrradiance(poaActualRaw),
       kwhBudget: parseVal(newRow.kwhBudget),
       prBudget: prB,
       correctedPrBudget: corrPrB,
@@ -191,9 +218,12 @@ export const parseRawData = (rows: RawRow[]): DailyData[] => {
       isForecast: false,
       notes: newRow.notes ? String(newRow.notes) : undefined,
       estimatedLoss: newRow.estimatedLoss !== undefined ? parseVal(newRow.estimatedLoss) : undefined,
-      moduleTemp: newRow.moduleTemp !== undefined ? parseVal(newRow.moduleTemp) : null,
+      moduleTemp: modTemp,
       curtailment: newRow.curtailment !== undefined ? parseVal(newRow.curtailment) : null,
-      thermalVariance: 0, 
+      thermalVariance: 0,
+      lossFactor: 1.0,                   // computed in runProjection
+      theoPoaAct: 0,                     // computed in runProjection
+      theoPoaBud: 0,                     // computed in runProjection
       paeEnergy: newRow.paeEnergy !== undefined && newRow.paeEnergy !== null ? parseVal(newRow.paeEnergy) : null,
       guaranteedAvailability: gAvail,
       actualAvailability: aAvail
@@ -221,32 +251,68 @@ export const parseRawData = (rows: RawRow[]): DailyData[] => {
       if (d.bessOperationMode) staticRec.modes.add(d.bessOperationMode);
   });
 
-  return parsed.map(d => {
-      const rec = siteStaticData.get(d.siteName)!;
-      return { 
-          ...d, 
-          systemCapacity: d.systemCapacity || rec.pv,
-          invCapacity: d.invCapacity || rec.inv,
-          bessCapacity: d.bessCapacity || rec.bess,
-          cod: d.cod || rec.cod,
-      };
-  });
+    // Carry-forward only — no MAX fallback. Pre-first-valid rows leave capacity at 0 (= inactive/pre-COD).
+    // Rationale: filling pre-COD rows with future MAX capacity makes PR denominator falsely large,
+    // understating PR for periods when the plant didn't yet exist.
+    const result: DailyData[] = [];
+    const lastKnownCap = new Map<string, { pv: number, inv: number, bess: number }>();
+    for (const d of parsed) {
+        const prev = lastKnownCap.get(d.siteName) ?? { pv: 0, inv: 0, bess: 0 };
+        const next = {
+            pv:   (d.systemCapacity && d.systemCapacity > 0) ? d.systemCapacity : prev.pv,
+            inv:  (d.invCapacity   && d.invCapacity   > 0) ? d.invCapacity   : prev.inv,
+            bess: (d.bessCapacity  && d.bessCapacity  > 0) ? d.bessCapacity  : prev.bess,
+        };
+        lastKnownCap.set(d.siteName, next);
+
+        const rec = siteStaticData.get(d.siteName)!;
+        result.push({
+            ...d,
+            systemCapacity: (d.systemCapacity && d.systemCapacity > 0) ? d.systemCapacity : next.pv,
+            invCapacity:    (d.invCapacity   && d.invCapacity   > 0) ? d.invCapacity   : next.inv,
+            bessCapacity:   (d.bessCapacity  && d.bessCapacity  > 0) ? d.bessCapacity  : next.bess,
+            cod: d.cod || rec.cod,
+        });
+    }
+    return result;
 };
 
+/**
+ * Returns the LATEST (most-recent-date) capacity per site.
+ * Use for: SystemSpecs header, "current installed" displays, trendPr lookback.
+ * NOT for historical period aggregation — use `d.systemCapacity` per-row instead,
+ * because aggregating with a single capacity over a period when capacity changed
+ * would produce wrong PR ratios for sub-periods.
+ */
 export const getSiteCapacityMap = (data: DailyData[]): Map<string, number> => {
   const map = new Map<string, number>();
   const uniqueSites = Array.from(new Set(data.map(d => d.siteName)));
-  
+
   uniqueSites.forEach(site => {
-      const row = data.find(d => d.siteName === site && d.systemCapacity && d.systemCapacity > 0);
-      if (row) {
-          map.set(site, row.systemCapacity!);
-      } else {
-          map.set(site, 0); 
-      }
+      // data is already sorted ascending by date in parseRawData,
+      // so the last non-zero entry is the most recent installed capacity.
+      const siteRows = data.filter(d => d.siteName === site && d.systemCapacity && d.systemCapacity > 0);
+      if (siteRows.length === 0) { map.set(site, 0); return; }
+      const latest = siteRows[siteRows.length - 1].systemCapacity!;
+      map.set(site, latest);
   });
   return map;
-}
+};
+
+/**
+ * Returns the MAX capacity ever recorded per site.
+ * Use for: nameplate / contract limits / historical peak displays.
+ */
+export const getSiteMaxCapacityMap = (data: DailyData[]): Map<string, number> => {
+  const map = new Map<string, number>();
+  const uniqueSites = Array.from(new Set(data.map(d => d.siteName)));
+  uniqueSites.forEach(site => {
+      const caps = data.filter(d => d.siteName === site && d.systemCapacity && d.systemCapacity > 0)
+                       .map(d => d.systemCapacity!);
+      map.set(site, caps.length > 0 ? Math.max(...caps) : 0);
+  });
+  return map;
+};
 
 export const runProjection = (
     data: DailyData[], 
@@ -269,14 +335,30 @@ export const runProjection = (
   const codList: Date[] = [];
   const modeSet = new Set<string>();
   
+  // SystemSpecs reflects CURRENT INSTALLED state (latest non-zero per site), not first row.
+  // First-row was buggy: if plant expanded mid-year, header showed pre-expansion capacity.
+  const latestCapMap = getSiteCapacityMap(data);
   uniqueSites.forEach(site => {
-      const row = data.find(d => d.siteName === site);
-      if (row) {
-          totalPVCapacity += (row.systemCapacity || 0);
-          totalInvCapacity += (row.invCapacity || 0);
-          totalBessCapacity += (row.bessCapacity || 0);
-          if (row.cod) codList.push(row.cod);
+      const siteRows = data.filter(d => d.siteName === site);
+      if (siteRows.length === 0) return;
+
+      totalPVCapacity += latestCapMap.get(site) || 0;
+
+      // Inv & BESS: scan from the end for the last non-zero entry
+      let latestInv = 0;
+      let latestBess = 0;
+      for (let i = siteRows.length - 1; i >= 0; i--) {
+          const r = siteRows[i];
+          if (latestInv === 0 && r.invCapacity && r.invCapacity > 0) latestInv = r.invCapacity;
+          if (latestBess === 0 && r.bessCapacity && r.bessCapacity > 0) latestBess = r.bessCapacity;
+          if (latestInv !== 0 && latestBess !== 0) break;
       }
+      totalInvCapacity += latestInv;
+      totalBessCapacity += latestBess;
+
+      // COD: parseRawData already backfilled cod from the earliest valid value
+      const lastRow = siteRows[siteRows.length - 1];
+      if (lastRow.cod) codList.push(lastRow.cod);
   });
 
   data.forEach(d => {
@@ -316,8 +398,9 @@ export const runProjection = (
   let sumPrBudgetWeighted = 0;
 
   recentData.forEach(d => {
-      const cap = siteCapacityMap.get(d.siteName) || d.systemCapacity || 0;
-      const theoretical = (d.ghiActual! * cap);
+      const cap = d.systemCapacity || siteCapacityMap.get(d.siteName) || 0;
+      const irr = (d.poaActual && d.poaActual > 0) ? d.poaActual : (d.ghiActual || 0);
+      const theoretical = irr * cap;
       sumEnergyActual += (d.kwhActual || 0);
       sumEnergyTheoretical += theoretical;
 
@@ -334,8 +417,13 @@ export const runProjection = (
   const mtdStartDate = startOfMonth(lastActualDate);
   const ytdStartDate = startOfYear(lastActualDate);
 
-  const TEMP_COEFF_PCT = 0.0029;
+  // Temperature coefficient (γ) — per IEC 61724-3 capacity evaluation method.
+  // γ = -0.0029 /°C is conservative; configurable per-site is recommended (see refactor backlog).
+  const GAMMA = -0.0029;
   const STC_TEMP = 25;
+  const T_FALLBACK = 25;             // safest fallback when moduleTemp missing → lossFactor = 1.0
+  const LOSS_FACTOR_MIN = 0.5;       // saturation guards against extreme/anomalous temperatures
+  const LOSS_FACTOR_MAX = 1.2;
 
   let ytdKwhBudget = 0;
   let ytdKwhActual = 0;
@@ -369,32 +457,50 @@ export const runProjection = (
     const isPast = d.date <= lastActualDate;
     let kwhForecast = 0;
     let ghiForecast = 0;
-    
+
     let effectiveKwhBudget = d.kwhBudget;
-    const effectiveCapacity = siteCapacityMap.get(d.siteName) || d.systemCapacity || 0;
-    
+    const effectiveCapacity = d.systemCapacity || 0;       // per-row (carry-forward in parseRawData)
+
+    // ── Temperature loss factor (IEC 61724-3): lossFactor = 1 + γ·ΔT, γ = -0.0029 /°C ──
+    // Fallback: moduleTemp null → assume STC → lossFactor = 1.0 (no correction).
+    const moduleT = d.moduleTemp !== null ? d.moduleTemp : T_FALLBACK;
+    const deltaT  = moduleT - STC_TEMP;
+    let lossFactor = 1 + (GAMMA * deltaT);
+    if (lossFactor < LOSS_FACTOR_MIN) lossFactor = LOSS_FACTOR_MIN;
+    if (lossFactor > LOSS_FACTOR_MAX) lossFactor = LOSS_FACTOR_MAX;
+
+    // ── Irradiance: prefer measured POA; fallback to GHI for legacy datasets ──
+    const poaAct = (d.poaActual && d.poaActual > 0) ? d.poaActual
+                 : (d.ghiActual && d.ghiActual > 0) ? d.ghiActual : 0;
+    const poaBud = (d.poaBudget && d.poaBudget > 0) ? d.poaBudget : d.ghiBudget;
+
+    // ── Theoretical energies ──
+    // Theo_POA_Act = lossFactor × cap × POA_Actual  (per user spec)
+    // Theo_POA_Bud = cap × POA_Budget               (budget assumed at STC, no temp correction)
+    const theoPoaAct = lossFactor * effectiveCapacity * poaAct;
+    const theoPoaBud = effectiveCapacity * poaBud;
+
+    // ── Thermal variance (signed, kept negative for "loss" in waterfall UI) ──
+    // Magnitude = ((1/lossFactor) - 1) × kWh_Actual  (per user spec; positive when hot).
+    // Stored as NEGATIVE so existing waterfall/loss UI (red = loss) renders correctly.
     let dailyThermalVariance = 0;
-    if (d.ghiActual && d.ghiActual > 0 && d.moduleTemp !== null) {
-        const theoretical = d.ghiActual * effectiveCapacity;
-        if (theoretical > 0) {
-            const deltaT = d.moduleTemp - STC_TEMP;
-            const lossFactor = deltaT * TEMP_COEFF_PCT;
-            dailyThermalVariance = theoretical * (-lossFactor);
-        }
+    if (d.kwhActual && d.kwhActual > 0 && lossFactor > 0 && d.moduleTemp !== null) {
+        const magnitude = ((1 / lossFactor) - 1) * d.kwhActual;
+        dailyThermalVariance = -magnitude;
     }
 
     if (!isPast) {
-      if (d.ghiBudget > 0 && effectiveCapacity > 0) {
-          kwhForecast = d.ghiBudget * trendPr * effectiveCapacity;
+      if (poaBud > 0 && effectiveCapacity > 0) {
+          kwhForecast = poaBud * trendPr * effectiveCapacity;
       } else if (d.kwhBudget > 0 && d.prBudget > 0) {
           kwhForecast = d.kwhBudget * (trendPr / d.prBudget);
       } else {
-          kwhForecast = d.kwhBudget; 
+          kwhForecast = d.kwhBudget;
       }
       ghiForecast = d.ghiBudget;
-      if ((!effectiveKwhBudget || effectiveKwhBudget === 0) && d.ghiBudget > 0) {
+      if ((!effectiveKwhBudget || effectiveKwhBudget === 0) && poaBud > 0) {
           const prForBudget = d.prBudget > 0 ? d.prBudget : trendPr;
-          effectiveKwhBudget = d.ghiBudget * prForBudget * effectiveCapacity;
+          effectiveKwhBudget = poaBud * prForBudget * effectiveCapacity;
       }
     } else {
       if (d.kwhActual !== null) {
@@ -404,26 +510,24 @@ export const runProjection = (
         }
         const budget = effectiveKwhBudget;
         let weatherCorrected = budget;
+        // Weather correction still uses GHI ratio (legacy contract definition);
+        // can switch to POA ratio later when budgets are POA-defined.
         if (d.ghiBudget > 0 && d.ghiActual !== null && d.ghiActual > 0) {
           weatherCorrected = budget * (d.ghiActual / d.ghiBudget);
         }
         const irrVar = weatherCorrected - budget;
-        const prVar = actual - weatherCorrected;
-
-        const irrAct = (d.ghiActual !== null && d.ghiActual > 0) ? d.ghiActual : d.ghiBudget;
-        const theoAct = irrAct * effectiveCapacity;
-        const theoBud = d.ghiBudget * effectiveCapacity;
+        const prVar  = actual - weatherCorrected;
 
         if (d.date >= ytdStartDate) {
             ytdKwhBudget += budget;
             ytdKwhActual += actual;
             ytdVarianceIrradiance += irrVar;
             ytdVariancePr += prVar;
-            ytdTheoreticalActual += theoAct;
-            ytdTheoreticalBudget += theoBud;
-            if (d.correctedPrBudget) ytdCorrectedPrBudgetSum += (d.correctedPrBudget * theoBud);
+            ytdTheoreticalActual += theoPoaAct;
+            ytdTheoreticalBudget += theoPoaBud;
+            if (d.correctedPrBudget) ytdCorrectedPrBudgetSum += (d.correctedPrBudget * theoPoaBud);
             ytdCurtailment += (d.curtailment || 0);
-            if (d.moduleTemp !== null) { ytdTempNum += (d.moduleTemp * irrAct); ytdTempDenom += irrAct; }
+            if (d.moduleTemp !== null) { ytdTempNum += (d.moduleTemp * poaAct); ytdTempDenom += poaAct; }
             ytdVarianceThermal += dailyThermalVariance;
             ytdGhiBudget += d.ghiBudget;
             ytdGhiActual += (d.ghiActual || 0);
@@ -434,11 +538,11 @@ export const runProjection = (
             mtdKwhActual += actual;
             mtdVarianceIrradiance += irrVar;
             mtdVariancePr += prVar;
-            mtdTheoreticalActual += theoAct;
-            mtdTheoreticalBudget += theoBud;
-            if (d.correctedPrBudget) mtdCorrectedPrBudgetSum += (d.correctedPrBudget * theoBud);
+            mtdTheoreticalActual += theoPoaAct;
+            mtdTheoreticalBudget += theoPoaBud;
+            if (d.correctedPrBudget) mtdCorrectedPrBudgetSum += (d.correctedPrBudget * theoPoaBud);
             mtdCurtailment += (d.curtailment || 0);
-            if (d.moduleTemp !== null) { mtdTempNum += (d.moduleTemp * irrAct); mtdTempDenom += irrAct; }
+            if (d.moduleTemp !== null) { mtdTempNum += (d.moduleTemp * poaAct); mtdTempDenom += poaAct; }
             mtdVarianceThermal += dailyThermalVariance;
             mtdGhiBudget += d.ghiBudget;
             mtdGhiActual += (d.ghiActual || 0);
@@ -453,7 +557,10 @@ export const runProjection = (
       ghiActual: isPast ? (d.ghiActual || 0) : null,
       ghiForecast: isPast ? 0 : ghiForecast,
       isForecast: !isPast,
-      thermalVariance: dailyThermalVariance
+      thermalVariance: dailyThermalVariance,
+      lossFactor,
+      theoPoaAct,
+      theoPoaBud,
     };
   });
 
@@ -485,23 +592,24 @@ export const runProjection = (
     }
 
     const m = monthlyMap.get(monthKey)!;
-    const capacity = siteCapacityMap.get(d.siteName) || d.systemCapacity || 0;
+    // PER-ROW capacity. Pre-COD rows (cap=0) skipped from aggregation entirely
+    // so theoretical denominators don't get inflated by future capacity.
+    const capacity = d.systemCapacity || 0;
 
     m.kwhBudget += d.kwhBudget;
     m.kwhActual += (d.kwhActual || 0);
     m.kwhForecast += d.kwhForecast || 0;
-    
+
     m.ghiBudget += d.ghiBudget;
     m.ghiActual += (d.ghiActual || 0);
     m.ghiForecast += d.ghiForecast || 0;
 
     if (d.curtailment && d.curtailment > 0) m.curtailmentSum += d.curtailment;
-    
+
     if (d.paeEnergy && d.paeEnergy > 0) {
         m.paeEnergySum += d.paeEnergy;
     }
 
-    // Availability Aggregation
     if (d.guaranteedAvailability !== null) {
         m.guaranteedAvailabilitySum += d.guaranteedAvailability;
         m.guaranteedAvailabilityCount++;
@@ -511,27 +619,31 @@ export const runProjection = (
         m.actualAvailabilityCount++;
     }
 
-    const theoreticalBudget = d.ghiBudget * capacity;
-    m.theoreticalKwhBudget += theoreticalBudget;
-    m.weightedPrBudgetSum += (d.prBudget * theoreticalBudget);
-    
-    if (d.correctedPrBudget) m.weightedCorrectedPrBudgetSum += (d.correctedPrBudget * theoreticalBudget);
-    if (d.contractorPrTarget) m.weightedContractorPrTargetSum += (d.contractorPrTarget * theoreticalBudget);
-    
+    if (capacity <= 0) return;     // pre-COD / inactive — skip energy theoreticals only
+
+    // Theoreticals computed in daily loop; here we just sum them.
+    m.theoreticalKwhBudget += d.theoPoaBud;
+    m.weightedPrBudgetSum += (d.prBudget * d.theoPoaBud);
+
+    if (d.correctedPrBudget) m.weightedCorrectedPrBudgetSum += (d.correctedPrBudget * d.theoPoaBud);
+    if (d.contractorPrTarget) m.weightedContractorPrTargetSum += (d.contractorPrTarget * d.theoPoaBud);
+
     if (!d.isForecast && d.kwhActual !== null) {
-        const irr = (d.ghiActual !== null && d.ghiActual > 0) ? d.ghiActual : d.ghiBudget;
-        m.theoreticalKwhActual += (irr * capacity);
+        // d.theoPoaAct already includes lossFactor (temp correction) — single source of truth.
+        m.theoreticalKwhActual += d.theoPoaAct;
         m.energyActualSum += (d.kwhActual || 0);
-        
-        if (d.moduleTemp !== null && d.moduleTemp > -50) {
-            m.tempWeightedSum += (d.moduleTemp * irr);
-            m.irradianceSumForTemp += irr;
+
+        const poaAct = (d.poaActual && d.poaActual > 0) ? d.poaActual
+                     : (d.ghiActual && d.ghiActual > 0) ? d.ghiActual : 0;
+        if (d.moduleTemp !== null && d.moduleTemp > -50 && poaAct > 0) {
+            m.tempWeightedSum += (d.moduleTemp * poaAct);
+            m.irradianceSumForTemp += poaAct;
         }
         m.varianceThermalSum += d.thermalVariance;
     }
     if (d.isForecast) {
         const irr = d.ghiForecast > 0 ? d.ghiForecast : d.ghiBudget;
-        m.theoreticalKwhForecast += (irr * capacity); 
+        m.theoreticalKwhForecast += (irr * capacity);
     }
   });
 
@@ -549,13 +661,13 @@ export const runProjection = (
     const curtailment = m.curtailmentSum;
     const moduleTemp = m.irradianceSumForTemp > 0 ? m.tempWeightedSum / m.irradianceSumForTemp : null;
 
-    let correctedPr = null;
-    
-    if (prActual !== null) {
-        const thermalLossEnergy = -m.varianceThermalSum;
-        const grossEnergy = m.energyActualSum + curtailment + thermalLossEnergy;
-        correctedPr = m.theoreticalKwhActual > 0 ? grossEnergy / m.theoreticalKwhActual : 0;
-    }
+    // Corrected PR (user spec, IEC 61724-3-style):
+    //   Corr_PR = Σ kWh_Actual / Σ Theo_POA_Act
+    // Temperature correction is already in the denominator (theoPoaAct = lossFactor × cap × POA).
+    // Curtailment is NOT credited — kWh_Actual is post-curtailment per data convention.
+    const correctedPr = m.theoreticalKwhActual > 0
+        ? m.energyActualSum / m.theoreticalKwhActual
+        : null;
 
     // Availability Averages
     const guaranteedAvailability = m.guaranteedAvailabilityCount > 0 ? m.guaranteedAvailabilitySum / m.guaranteedAvailabilityCount : null;
@@ -614,19 +726,24 @@ export const runProjection = (
   const totalProjected = monthlyData.reduce((sum, m) => sum + m.totalProjected, 0);
   const varianceYearEnd = totalBudget > 0 ? ((totalProjected - totalBudget) / totalBudget) * 100 : 0;
 
-  const calcPrs = (kwhAct: number, kwhBud: number, theoAct: number, theoBud: number, cur: number, tNum: number, tDen: number, corrPrBudSum: number, varianceThermal: number) => {
-      const prBudget = theoBud > 0 ? kwhBud / theoBud : 0;
-      const prActual = theoAct > 0 ? kwhAct / theoAct : 0;
+  // PR formulas (per user spec, IEC 61724-3 aligned):
+  //   PR Actual    = Σ kWh_Actual / Σ Theo_POA_Act_uncorrected (here: theoAct already includes temp correction)
+  //   PR Budget    = Σ kWh_Budget / Σ Theo_POA_Bud
+  //   Corr PR      = Σ kWh_Actual / Σ Theo_POA_Act  (temp correction baked into denominator)
+  //   Corr PR Bud  = weighted Σ correctedPrBudget × Theo_POA_Bud / Σ Theo_POA_Bud
+  // Curtailment is NOT credited (kWh_Actual already includes curtailment per data convention).
+  // _cur, _tNum, _tDen, _varianceThermal are kept in the signature for backward compatibility
+  // but no longer participate in the math.
+  const calcPrs = (
+      kwhAct: number, kwhBud: number,
+      theoAct: number, theoBud: number,
+      _cur: number, _tNum: number, _tDen: number,
+      corrPrBudSum: number, _varianceThermal: number
+  ) => {
+      const prBudget          = theoBud > 0 ? kwhBud / theoBud : 0;
+      const prActual          = theoAct > 0 ? kwhAct / theoAct : 0;
       const correctedPrBudget = theoBud > 0 ? corrPrBudSum / theoBud : 0;
-      
-      let correctedPr = prActual;
-      
-      if (theoAct > 0) {
-          const thermalLossEnergy = -varianceThermal;
-          const grossEnergy = kwhAct + cur + thermalLossEnergy;
-          correctedPr = grossEnergy / theoAct;
-      }
-      
+      const correctedPr       = theoAct > 0 ? kwhAct / theoAct : 0;
       return { prBudget, prActual, correctedPr, correctedPrBudget };
   };
 
