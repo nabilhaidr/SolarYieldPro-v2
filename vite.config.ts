@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
     
     return {
       // Set the base path to match your new repository name
-      base: '/SolarYieldPro/', 
+      base: '/SolarYieldPro-v2/', 
       server: {
         port: 3000,
         host: '0.0.0.0',
